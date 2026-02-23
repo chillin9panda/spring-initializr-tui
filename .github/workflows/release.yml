@@ -26,6 +26,12 @@ jobs:
             arch: x86_64
             artifact: spring-initializr-tui-windows-x86_64.exe
             ext: '.exe'
+          # Linux v2 binary (older CPU compatible)
+          - os: ubuntu-latest
+            arch: x86_64
+            artifact: spring-initializr-tui-linux-x86_64-v2
+            ext: ''
+            march: x86-64-v2
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +46,12 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Build native image
-        run: mvn -Pnative package -DskipTests
+        run: |
+          if [ -z "${{ matrix.march }}" ]; then
+            mvn -Pnative package -DskipTests
+          else
+            mvn -Pnative package -DskipTests -Dnative.buildArgs="-march=${{ matrix.march }}"
+          fi
 
       - name: Rename binary
         shell: bash
