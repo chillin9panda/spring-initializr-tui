@@ -46,6 +46,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Build native image
+        shell: bash
         run: |
           if [ -z "${{ matrix.march }}" ]; then
             mvn -Pnative package -DskipTests
