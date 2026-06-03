@@ -21,6 +21,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.nio.file.attribute.PosixFilePermission;
 
 import static dev.tamboui.toolkit.Toolkit.*;
 
@@ -53,6 +54,8 @@ public class SpringInitializrTui extends ToolkitApp {
 
     // "Open in Terminal" — print cd command after TUI exits
     private volatile Path pendingTerminalDir;
+
+    private boolean vimInsertMode = false;
 
     @Override
     protected void onStart() {
@@ -157,6 +160,18 @@ public class SpringInitializrTui extends ToolkitApp {
             return EventResult.UNHANDLED;
         }
 
+        // Esc — exit insert mode (before quit check steals it)
+        if (event.isCancel() && vimInsertMode) {
+            setInsertMode(false);
+            return EventResult.HANDLED;
+        }
+
+        // i — enter insert mode when on a text field in normal mode
+        if (event.isChar('i') && !vimInsertMode && isOnTextFieldArea()) {
+            setInsertMode(true);
+            return EventResult.HANDLED;
+        }
+
         // ? — Show help
         if (event.isChar('?') && !isTextFieldFocused()) {
             previousScreen = currentScreen;
@@ -198,6 +213,7 @@ public class SpringInitializrTui extends ToolkitApp {
 
         // Tab / Shift+Tab — Navigate focus (check both semantic and direct key)
         if (event.isFocusNext() || event.isKey(KeyCode.TAB)) {
+            setInsertMode(false);
             if (event.hasShift()) {
                 mainScreen.focusPrevious();
             } else {
@@ -206,31 +222,58 @@ public class SpringInitializrTui extends ToolkitApp {
             return EventResult.HANDLED;
         }
         if (event.isFocusPrevious()) {
+            setInsertMode(false);
             mainScreen.focusPrevious();
             return EventResult.HANDLED;
         }
 
-        // Arrow keys & Vim bindings — Up/Down also navigate between fields
-        if (event.isUp() || (event.hasCtrl() && event.isCharIgnoreCase('p')) 
-                || (event.isCharIgnoreCase('k') && !isTextFieldFocused())) {
+        // Arrow up — auto-insert when landing on a text field
+        if (event.isUp()) {
             if (mainScreen.getFocusArea() == MainScreen.FocusArea.DEPENDENCIES) {
                 if (mainScreen.getDependencyPicker().isAtTop()) {
                     mainScreen.focusPrevious();
+                    setInsertMode(isOnTextFieldArea());
                 } else {
                     mainScreen.getDependencyPicker().moveUp();
                 }
             } else {
                 mainScreen.focusPrevious();
+                setInsertMode(isOnTextFieldArea());
             }
             return EventResult.HANDLED;
         }
-        if (event.isDown() || (event.hasCtrl() && event.isCharIgnoreCase('n')) 
-                || (event.isCharIgnoreCase('j') && !isTextFieldFocused())
-                || (event.isConfirm() && isTextFieldFocused())) {
+        // Vim k — stay in normal mode (no auto-insert)
+        if (event.isCharIgnoreCase('k') && !isTextFieldFocused()) {
+            if (mainScreen.getFocusArea() == MainScreen.FocusArea.DEPENDENCIES) {
+                if (mainScreen.getDependencyPicker().isAtTop()) {
+                    mainScreen.focusPrevious();
+                    setInsertMode(false);
+                } else {
+                    mainScreen.getDependencyPicker().moveUp();
+                }
+            } else {
+                mainScreen.focusPrevious();
+                setInsertMode(false);
+            }
+            return EventResult.HANDLED;
+        }
+        // Arrow down + Enter-on-text-field — auto-insert when landing on a text field
+        if (event.isDown() || (event.isConfirm() && isTextFieldFocused())) {
             if (mainScreen.getFocusArea() == MainScreen.FocusArea.DEPENDENCIES) {
                 mainScreen.getDependencyPicker().moveDown();
             } else {
                 mainScreen.focusNext();
+                setInsertMode(isOnTextFieldArea());
+            }
+            return EventResult.HANDLED;
+        }
+        // Vim j — stay in normal mode (no auto-insert)
+        if (event.isCharIgnoreCase('j') && !isTextFieldFocused()) {
+            if (mainScreen.getFocusArea() == MainScreen.FocusArea.DEPENDENCIES) {
+                mainScreen.getDependencyPicker().moveDown();
+            } else {
+                mainScreen.focusNext();
+                setInsertMode(false);
             }
             return EventResult.HANDLED;
         }
@@ -357,13 +400,23 @@ public class SpringInitializrTui extends ToolkitApp {
         return EventResult.UNHANDLED;
     }
 
-    private boolean isTextFieldFocused() {
-        if (mainScreen == null) return false;
-
-        return mainScreen.isSearchMode() || switch (mainScreen.getFocusArea()) {
+    private boolean isOnTextFieldArea() {
+        return mainScreen != null && switch (mainScreen.getFocusArea()) {
             case GROUP, ARTIFACT, NAME, DESCRIPTION -> true;
             default -> false;
         };
+    }
+
+    private boolean isTextFieldFocused() {
+        if (mainScreen == null) return false;
+        // Suppress global shortcuts while searching (#15) or while editing a
+        // text field in vim insert mode (#18).
+        return mainScreen.isSearchMode() || (vimInsertMode && isOnTextFieldArea());
+    }
+
+    private void setInsertMode(boolean mode) {
+        vimInsertMode = mode;
+        mainScreen.setInsertMode(mode);
     }
 
     private static final Set<String> SKIP_EXTENSIONS = Set.of(
@@ -540,9 +593,30 @@ public class SpringInitializrTui extends ToolkitApp {
                 }
             }
         }
+        makeExecutable(destDir, "gradlew", "mvnw");
 
         if ("yaml".equals(config.getApplicationFormat())) {
             convertPropertiesToYaml(destDir);
+        }
+    }
+
+    void makeExecutable(Path destDir, String... scripts) {
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            return;
+        }
+        for (String script : scripts) {
+            Path path = destDir.resolve(script);
+            try {
+                if (Files.exists(path)) {
+                    var perms = new HashSet<>(Files.getPosixFilePermissions(path));
+                    perms.add(PosixFilePermission.OWNER_EXECUTE);
+                    perms.add(PosixFilePermission.GROUP_EXECUTE);
+                    perms.add(PosixFilePermission.OTHERS_EXECUTE);
+                    Files.setPosixFilePermissions(path, perms);
+                }
+            } catch (IOException | UnsupportedOperationException e) {
+                System.err.println("WARN: Could not set execute permissions on " + path + ": " + e.getMessage());
+            }
         }
     }
 
